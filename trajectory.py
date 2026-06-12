@@ -111,6 +111,61 @@ def resolve_trajectory_path(raw: str) -> Path:
     return matches[0]
 
 
+# Globs (relative to a folder) where a trajectory.json may live. Bounded on
+# purpose so discovery stays fast even on large directories.
+_TRAJECTORY_GLOBS = [
+    "agent/trajectory.json",
+    "*/agent/trajectory.json",
+    "trajectory.json",
+]
+
+
+def _quick_find_trajectory(path: Path) -> Path | None:
+    """Cheaply locate a trajectory.json at/under ``path`` (bounded depth)."""
+    for pattern in _TRAJECTORY_GLOBS:
+        for match in sorted(path.glob(pattern)):
+            if match.is_file():
+                return match
+    return None
+
+
+def discover_instances(raw: str) -> list[tuple[str, str]]:
+    """Find selectable trajectory instances at ``raw``.
+
+    Returns a list of ``(label, path)`` pairs where ``path`` can be handed to
+    :func:`load_trajectory`:
+
+    - If ``raw`` is a trajectory file, return just its containing instance.
+    - If ``raw`` is a single instance folder (``agent/trajectory.json`` right
+      under it), return only that folder.
+    - Otherwise, return each immediate sub-folder that contains a trajectory
+      (the common "directory of many instances" case).
+    """
+    p = Path(raw).expanduser()
+    if not p.exists():
+        raise FileNotFoundError(f"Path does not exist: {p}")
+
+    if p.is_file():
+        root = _instance_root(p)
+        return [(root.name, str(p))]
+
+    # A single instance folder directly holding agent/trajectory.json.
+    if (p / "agent" / "trajectory.json").is_file():
+        return [(p.name, str(p))]
+
+    # Immediate sub-folders that each contain a trajectory.
+    children = sorted(c for c in p.iterdir() if c.is_dir())
+    found = [(c.name, str(c)) for c in children if _quick_find_trajectory(c) is not None]
+    if found:
+        return found
+
+    # Fallback: the path itself resolves to a single (deeper-nested) instance.
+    if _quick_find_trajectory(p) is not None:
+        return [(p.name, str(p))]
+
+    return []
+
+
 # --------------------------------------------------------------------------- #
 # Sibling metadata (reward, config, result)
 # --------------------------------------------------------------------------- #
