@@ -81,6 +81,47 @@ def inject_css() -> None:
       }
       .ribbon-bars { display: flex; height: 8px; }
       .ribbon-bars span { flex: 1; }
+      /* Fixed vertical navigator pinned to the right edge of the viewport. */
+      .side-ribbon {
+        position: fixed;
+        right: 6px;
+        top: 70px;
+        max-height: calc(100vh - 90px);
+        overflow-y: auto;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding: 6px 4px;
+        background: rgba(20,22,30,0.85);
+        border: 1px solid rgba(128,128,128,0.35);
+        border-radius: 6px;
+        backdrop-filter: blur(2px);
+      }
+      .side-ribbon .side-title {
+        font-size: 9px; text-align: center; color: #aaa;
+        text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px;
+      }
+      .side-cell {
+        width: 34px;
+        text-decoration: none;
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid rgba(128,128,128,0.4);
+        color: inherit !important;
+        transition: box-shadow .15s ease;
+      }
+      .side-cell:hover { outline: 2px solid #fff; }
+      .side-cell .ribbon-num { padding: 0; font-size: 10px; }
+      .side-cell .ribbon-bars { height: 6px; transition: height .15s ease; }
+      /* The step currently in view: same width, ~3x taller and highlighted. */
+      .side-cell.active {
+        border: 2px solid #ffffff;
+        box-shadow: 0 0 10px rgba(255,255,255,0.6);
+      }
+      .side-cell.active .ribbon-num { font-size: 13px; font-weight: 700; padding: 4px 0; }
+      .side-cell.active .ribbon-bars { height: 34px; }
+
       .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 2px 0; }
       .legend-item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
       .legend-swatch { width: 14px; height: 14px; border-radius: 3px; }
@@ -119,6 +160,67 @@ def render_ribbon(traj: T.Trajectory) -> None:
     st.markdown(
         f'<div class="ribbon-wrap"><div class="ribbon">{"".join(cells)}</div></div>',
         unsafe_allow_html=True,
+    )
+
+
+def render_side_ribbon(traj: T.Trajectory) -> None:
+    """A fixed vertical copy of the ribbon that stays visible while scrolling."""
+    cells = ['<div class="side-title">steps</div>']
+    for step in traj.steps:
+        roles = step.roles or [T.ROLE_SYSTEM]
+        bars = "".join(
+            f'<span style="background:{ROLE_COLORS[r]}"></span>' for r in roles
+        )
+        tip = f"Step {step.index + 1}: " + ", ".join(ROLE_LABELS[r] for r in roles)
+        cells.append(
+            f'<a class="side-cell" href="#{step_anchor(step.index)}" title="{html.escape(tip)}">'
+            f'<div class="ribbon-num">{step.index + 1}</div>'
+            f'<div class="ribbon-bars">{bars}</div></a>'
+        )
+    st.markdown(
+        f'<div class="side-ribbon">{"".join(cells)}</div>',
+        unsafe_allow_html=True,
+    )
+    _inject_scrollspy()
+
+
+def _inject_scrollspy() -> None:
+    """Highlight the side-ribbon cell of the step currently in view.
+
+    Streamlit sanitizes <script> in markdown, so we run JS inside a
+    components iframe and reach into the parent document (same origin) to
+    track scroll position and toggle the `.active` class.
+    """
+    st.iframe(
+        """
+        <script>
+        const doc = window.parent.document;
+        function update() {
+            const steps = Array.from(doc.querySelectorAll('[id^="step-"]'));
+            if (!steps.length) return;
+            let active = steps[0].id;
+            for (const el of steps) {
+                if (el.getBoundingClientRect().top <= 140) active = el.id;
+                else break;
+            }
+            doc.querySelectorAll('.side-cell').forEach(a => {
+                a.classList.toggle('active', a.getAttribute('href') === '#' + active);
+            });
+        }
+        const root = window.parent;
+        let ticking = false;
+        function onScroll() {
+            if (ticking) return;
+            ticking = true;
+            root.requestAnimationFrame(() => { update(); ticking = false; });
+        }
+        root.addEventListener('scroll', onScroll, true);
+        root.addEventListener('resize', onScroll, true);
+        setInterval(update, 400);
+        update();
+        </script>
+        """,
+        height=1,
     )
 
 
@@ -225,6 +327,7 @@ def main() -> None:
     render_header(traj)
     render_legend()
     render_ribbon(traj)
+    render_side_ribbon(traj)
 
     if not traj.steps:
         st.warning("This trajectory has no steps.")
