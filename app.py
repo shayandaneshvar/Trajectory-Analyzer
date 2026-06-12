@@ -280,7 +280,6 @@ def render_header(traj: T.Trajectory) -> None:
     else:
         badge = f"⚠️ reward = {traj.reward}"
 
-    st.title("🛰️ Trajectory Analyzer")
     st.markdown(f"### `{traj.instance_name}` — {badge}")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -299,27 +298,56 @@ def render_header(traj: T.Trajectory) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Main
+# Sidebar loader: a path field + a selectable list of discovered instances
 # --------------------------------------------------------------------------- #
-def main() -> None:
-    st.set_page_config(page_title="Trajectory Analyzer", layout="wide")
-    inject_css()
-
+def sidebar_loader() -> str | None:
+    """Render the loader and return the chosen trajectory path (or None)."""
     st.sidebar.header("Load trajectory")
-    default = "samples/huggingface__datasets-7170__TUXmHfo"
+    default = "samples"
     raw_path = st.sidebar.text_input(
-        "Path to trajectory.json or instance folder",
-        value=st.session_state.get("traj_path", default),
-        help="Accepts a trajectory.json, an instance folder, or its parent.",
+        "Path (file, instance folder, or a folder of instances)",
+        value=st.session_state.get("traj_base_path", default),
+        help="Sub-folders that contain a trajectory will be listed below to select.",
     )
-    st.session_state["traj_path"] = raw_path
+    st.session_state["traj_base_path"] = raw_path
 
     if not raw_path.strip():
-        st.info("Enter a path in the sidebar to load a trajectory.")
+        st.sidebar.info("Enter a path to discover trajectories.")
+        return None
+
+    try:
+        instances = T.discover_instances(raw_path)
+    except Exception as exc:
+        st.sidebar.error(str(exc))
+        return None
+
+    if not instances:
+        st.sidebar.warning("No trajectory found under this path.")
+        return None
+
+    st.sidebar.caption(f"Found {len(instances)} trajectory folder(s):")
+    choice = st.sidebar.radio(
+        "Select a trajectory",
+        options=range(len(instances)),
+        format_func=lambda i: instances[i][0],
+        label_visibility="collapsed",
+        key="traj_choice",
+    )
+    return instances[choice][1]
+
+
+# --------------------------------------------------------------------------- #
+# Pages
+# --------------------------------------------------------------------------- #
+def trajectory_viewer_page() -> None:
+    inject_css()
+    chosen = sidebar_loader()
+    if chosen is None:
+        st.info("Pick a trajectory from the sidebar to begin.")
         return
 
     try:
-        traj = T.load_trajectory(raw_path)
+        traj = T.load_trajectory(chosen)
     except Exception as exc:  # surface load errors plainly
         st.error(f"Could not load trajectory: {exc}")
         return
@@ -335,6 +363,24 @@ def main() -> None:
 
     for step in traj.steps:
         render_step(step)
+
+
+# --------------------------------------------------------------------------- #
+# Main: top navigation bar. Add new capabilities as extra st.Page entries.
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    st.set_page_config(page_title="Trajectory Analyzer", layout="wide")
+    pages = [
+        st.Page(
+            trajectory_viewer_page,
+            title="Trajectory Viewer",
+            icon="🛰️",
+            default=True,
+        ),
+        # Future capabilities go here, e.g.:
+        # st.Page(comparison_page, title="Compare", icon="⚖️"),
+    ]
+    st.navigation(pages, position="top").run()
 
 
 if __name__ == "__main__":
