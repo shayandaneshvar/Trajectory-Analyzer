@@ -12,9 +12,12 @@ Run with::
 from __future__ import annotations
 
 import html
+import json
+from collections import Counter
 
 import streamlit as st
 
+import analysis as A
 import trajectory as T
 
 # --------------------------------------------------------------------------- #
@@ -121,6 +124,25 @@ def inject_css() -> None:
       }
       .side-cell.active .ribbon-num { font-size: 13px; font-weight: 700; padding: 4px 0; }
       .side-cell.active .ribbon-bars { height: 34px; }
+
+      /* Assigned-category chips: laid out side by side, ✕ shown on hover. */
+      [class*="st-key-chiprow__"] { flex-wrap: wrap !important; gap: 8px !important;
+                                    margin: 4px 0 10px 0; }
+      [class*="st-key-chip__"] {
+        background: transparent;
+        border: none !important;
+        padding: 0 0 0 4px !important;
+        align-items: center !important;
+        gap: 0 !important;
+        width: auto !important;
+      }
+      [class*="st-key-chip__"] p { margin: 0 !important; }
+      [class*="st-key-chip__"] .stButton button {
+        opacity: 0; min-height: 0; height: 22px; padding: 0 6px;
+        border: none; background: transparent; color: #ff8a80;
+        transition: opacity .12s ease;
+      }
+      [class*="st-key-chip__"]:hover .stButton button { opacity: 1; }
 
       .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 2px 0; }
       .legend-item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
@@ -325,15 +347,205 @@ def sidebar_loader() -> str | None:
         st.sidebar.warning("No trajectory found under this path.")
         return None
 
-    st.sidebar.caption(f"Found {len(instances)} trajectory folder(s):")
+    # Filters only make sense when several instances were discovered.
+    if len(instances) > 1:
+        instances = _apply_filters(instances)
+        if not instances:
+            st.sidebar.warning("No trajectories match the current filters.")
+            return None
+
+    st.sidebar.caption(f"Showing {len(instances)} trajectory folder(s):")
     choice = st.sidebar.radio(
         "Select a trajectory",
         options=range(len(instances)),
-        format_func=lambda i: instances[i][0],
+        format_func=lambda i: _instance_label(instances[i]),
         label_visibility="collapsed",
         key="traj_choice",
     )
     return instances[choice][1]
+
+
+@st.cache_data(show_spinner=False)
+def _reward_for(path: str) -> float | None:
+    return T.quick_reward(path)
+
+
+def _reward_badge(path: str) -> str:
+    r = _reward_for(path)
+    if r is None:
+        return "❔"
+    return "✅" if r >= 1.0 else "❌"
+
+
+def _instance_label(instance: tuple[str, str]) -> str:
+    name, path = instance
+    return f"{_reward_badge(path)} {name}"
+
+
+def _parse_filter_list(raw: str) -> list[str]:
+    """Parse a custom filter: a JSON list (``[\"a\", \"b\"]``) or comma-separated."""
+    raw = raw.strip()
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+        if isinstance(value, list):
+            return [str(x).strip() for x in value if str(x).strip()]
+    except ValueError:
+        pass
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _evalhub_key(name: str) -> str:
+    """Normalize an EvalHub name to ``Company__Repo`` (drops the random suffix)."""
+    return "__".join(name.split("__")[:2]).lower()
+
+
+def _apply_filters(instances: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Custom substring filter first, then the pass/fail status filter."""
+    # 1) Custom filter (applied first).
+    custom_raw = st.sidebar.text_input(
+        "Custom filter",
+        key="custom_filter",
+        placeholder='e.g. huggingface, conan  or  ["huggingface", "conan"]',
+        help="Match folders whose name contains any of these substrings.",
+    )
+    exclude = st.sidebar.toggle(
+        "Exclude matches",
+        key="custom_filter_exclude",
+        help="Off: include matches. On: exclude matches.",
+    )
+    evalhub = st.sidebar.toggle(
+        "EvalHub names",
+        value=True,
+        key="custom_filter_evalhub",
+        help="Treat entries as EvalHub names (Company__Repo__Random); the "
+             "random suffix is ignored when matching.",
+    )
+    subs = _parse_filter_list(custom_raw)
+    if subs:
+        if evalhub:
+            targets = {_evalhub_key(s) for s in subs}
+
+            def matches(name: str) -> bool:
+                return _evalhub_key(name) in targets
+        else:
+            lowered = [s.lower() for s in subs]
+
+            def matches(name: str) -> bool:
+                return any(s in name.lower() for s in lowered)
+
+        instances = [(n, p) for (n, p) in instances
+                     if matches(n) != exclude]
+
+    # 2) Pass/fail status filter (applied after the custom filter).
+    status = st.sidebar.pills(
+        "Status",
+        ["✅ Passed", "❌ Failed"],
+        selection_mode="multi",
+        default=[],
+        key="status_filter",
+        help="No selection shows all.",
+    )
+    if status:
+        want_pass = "✅ Passed" in status
+        want_fail = "❌ Failed" in status
+
+        def keep(path: str) -> bool:
+            r = _reward_for(path)
+            if r is None:
+                return False
+            passed = r >= 1.0
+            return (passed and want_pass) or ((not passed) and want_fail)
+
+        instances = [(n, p) for (n, p) in instances if keep(p)]
+
+    return instances
+
+
+# --------------------------------------------------------------------------- #
+# Failure categorization (tag from the top of the viewer page)
+# --------------------------------------------------------------------------- #
+def render_tagging(analysis_file, entry_key: str) -> None:
+    data = A.load_analysis(analysis_file)
+    current = A.get_categories_for(data, entry_key)
+    catalog = A.load_categories()
+    catalog_ids = [A.category_id(c) for c in catalog]
+    assigned_ids = {c.get("id") for c in current}
+
+    with st.container(border=True):
+        st.markdown("##### 🏷️ Categories for this trajectory")
+
+        # Currently assigned categories: horizontal chips, each with an ✕ that
+        # appears on hover (native buttons → removal handled in-session).
+        pending_key = f"pending_rm::{entry_key}"
+        if current:
+            with st.container(horizontal=True, key=f"chiprow__{entry_key}"):
+                for i, item in enumerate(current):
+                    cid = item.get("id", "")
+                    note = item.get("notes", "")
+                    with st.container(horizontal=True, width="content",
+                                      key=f"chip__{entry_key}__{i}"):
+                        if note:
+                            st.markdown(
+                                f'<code title="{html.escape(note, quote=True)}" '
+                                f'style="cursor:help">{html.escape(cid)}</code>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(f"`{cid}`")
+                        if st.button("✕", key=f"x__{entry_key}__{i}",
+                                     help="remove"):
+                            st.session_state[pending_key] = cid
+                            st.rerun()
+        else:
+            st.caption("No categories assigned yet.")
+
+        pending = st.session_state.get(pending_key)
+        if pending:
+            c1, c2, c3 = st.columns([6, 1, 1])
+            c1.markdown(f"Remove **`{pending}`**?")
+            if c2.button("Confirm", key=f"confirm::{entry_key}", type="primary"):
+                A.remove_category(analysis_file, entry_key, pending)
+                st.session_state.pop(pending_key, None)
+                st.rerun()
+            if c3.button("Cancel", key=f"cancel::{entry_key}"):
+                st.session_state.pop(pending_key, None)
+                st.rerun()
+
+        tab_existing, tab_new = st.tabs(["Assign existing", "Create new"])
+
+        with tab_existing:
+            available = [cid for cid in catalog_ids if cid not in assigned_ids]
+            if not available:
+                st.caption("No more existing categories to assign — create one →")
+            else:
+                sel = st.selectbox(
+                    "Category", available, key=f"sel::{entry_key}",
+                    help=A.category_descriptions().get(
+                        available[0], "") if available else "",
+                )
+                notes = st.text_input("Notes (optional)", key=f"note::{entry_key}")
+                if st.button("Add category", key=f"add::{entry_key}"):
+                    A.assign_category(analysis_file, entry_key, sel, notes.strip())
+                    st.rerun()
+
+        with tab_new:
+            st.caption("Type is `fail` for now. Id will be `fail:<short name>`.")
+            new_name = st.text_input("Short name", key=f"new_name::{entry_key}",
+                                     placeholder="e.g. wrong_test_setup")
+            new_desc = st.text_area("Description", key=f"new_desc::{entry_key}",
+                                    placeholder="What does this failure category mean?")
+            new_notes = st.text_input("Notes (optional)", key=f"new_note::{entry_key}")
+            if st.button("Create & assign", key=f"create::{entry_key}"):
+                if not new_name.strip():
+                    st.warning("Please enter a short name.")
+                else:
+                    cid = A.add_category(new_name, new_desc, type_=A.DEFAULT_TYPE)
+                    A.assign_category(analysis_file, entry_key, cid, new_notes.strip())
+                    st.rerun()
+
+        st.caption(f"Stored in `{analysis_file}` under key `{entry_key}`.")
 
 
 # --------------------------------------------------------------------------- #
@@ -353,6 +565,11 @@ def trajectory_viewer_page() -> None:
         return
 
     render_header(traj)
+
+    base = st.session_state.get("traj_base_path", "")
+    analysis_file, entry_key = A.analysis_target(base, chosen, traj.path)
+    render_tagging(analysis_file, entry_key)
+
     render_legend()
     render_ribbon(traj)
     render_side_ribbon(traj)
@@ -365,11 +582,152 @@ def trajectory_viewer_page() -> None:
         render_step(step)
 
 
+def categories_page() -> None:
+    st.header("🏷️ Categories")
+
+    catalog = A.load_categories()
+    st.subheader("Catalog")
+    if not catalog:
+        st.info("No categories defined yet.")
+    else:
+        st.table([{"id": A.category_id(c), "description": c.get("description", "")}
+                  for c in catalog])
+
+    with st.expander("➕ Add a new category"):
+        st.caption("Type is `fail` for now. Id will be `fail:<short name>`.")
+        name = st.text_input("Short name", key="catpage_name",
+                             placeholder="e.g. wrong_test_setup")
+        desc = st.text_area("Description", key="catpage_desc",
+                            placeholder="What does this failure category mean?")
+        if st.button("Create category", key="catpage_create"):
+            if not name.strip():
+                st.warning("Please enter a short name.")
+            else:
+                A.add_category(name, desc, type_=A.DEFAULT_TYPE)
+                st.rerun()
+
+    base = st.session_state.get("traj_base_path", "")
+    st.subheader("Assignments")
+    if not base.strip():
+        st.caption("Load a path in the Trajectory Viewer to see assignments.")
+        return
+
+    st.caption(f"Scanning `{base}` for `{A.ANALYSIS_FILENAME}` files.")
+    assignments = A.collect_assignments(base)
+    if not assignments:
+        st.info("No trajectories have been categorized under this path yet.")
+        return
+
+    descriptions = A.category_descriptions()
+    for cat_id in sorted(assignments):
+        folders = assignments[cat_id]
+        with st.expander(f"`{cat_id}`  ·  {len(folders)} trajectory(ies)"):
+            desc = descriptions.get(cat_id)
+            if desc:
+                st.caption(desc)
+            for item in folders:
+                line = f"- **{item['folder']}**"
+                if item.get("notes"):
+                    line += f" — {item['notes']}"
+                st.markdown(line)
+
+
+def summary_page() -> None:
+    st.header("📊 Summary")
+
+    # Select the path here; data comes from traj-analysis.json files under it
+    # joined with the category descriptions from resources/categories.json.
+    base = st.text_input(
+        "Path to a folder of trajectories",
+        value=st.session_state.get("traj_base_path", "samples"),
+        help="Scans this path for traj-analysis.json files.",
+    )
+    st.session_state["traj_base_path"] = base
+    if not base.strip():
+        st.info("Enter a path to summarize.")
+        return
+
+    # Flatten all assignments under the selected path into per-(name, tag) rows.
+    assignments = A.collect_assignments(base)
+    rows = [{"cat": cat_id, **item}
+            for cat_id, items in assignments.items() for item in items]
+    if not rows:
+        st.info("No tagged samples under this path yet.")
+        return
+
+    descriptions = A.category_descriptions()
+
+    # "Fail switch and all": filter the included samples by pass/fail status.
+    status = st.pills(
+        "Status", ["✅ Passed", "❌ Failed"],
+        selection_mode="multi", default=[], key="summary_status",
+        help="No selection shows all.",
+    )
+    if status:
+        want_pass = "✅ Passed" in status
+        want_fail = "❌ Failed" in status
+
+        def keep(path: str) -> bool:
+            r = _reward_for(path)
+            if r is None:
+                return False
+            passed = r >= 1.0
+            return (passed and want_pass) or ((not passed) and want_fail)
+
+        rows = [r for r in rows if keep(r["path"])]
+
+    if not rows:
+        st.warning("No samples match the filter.")
+        return
+
+    # Top-N tags by frequency (most repeated first).
+    counts = Counter(r["cat"] for r in rows)
+    top_n = st.number_input(
+        "Top N tags", min_value=1, max_value=len(counts),
+        value=min(10, len(counts)), step=1,
+    )
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:int(top_n)]
+    top_tags = [{"tag": c, "count": n, "description": descriptions.get(c, "")}
+                for c, n in ranked]
+    st.subheader("Top tags")
+    st.dataframe(top_tags, width="stretch", hide_index=True)
+
+    # Detail table: which sample has which tag, with descriptions and notes.
+    st.subheader(f"Tagged samples ({len(rows)} rows)")
+    table = sorted(
+        ({"name": r["folder"], "status": _reward_badge(r["path"]),
+          "tag": r["cat"], "description": descriptions.get(r["cat"], ""),
+          "note": r.get("notes", "")}
+         for r in rows),
+        key=lambda x: (x["name"], x["tag"]),
+    )
+    st.dataframe(table, width="stretch", hide_index=True)
+
+    # Export the data shown above to out/summaries/<datetime>.json.
+    st.subheader("Export")
+    exp_name = st.text_input("Experiment name", key="export_exp_name")
+    exp_desc = st.text_area("Description", key="export_exp_desc")
+    if st.button("Export summary"):
+        payload = {
+            "meta": {
+                "experiment_name": exp_name,
+                "description": exp_desc,
+                "source_path": base,
+                "status_filter": status,
+            },
+            "top_tags": top_tags,
+            "samples": table,
+        }
+        out_path = A.export_summary(payload)
+        st.success(f"Saved summary to `{out_path}`")
+
+
 # --------------------------------------------------------------------------- #
 # Main: top navigation bar. Add new capabilities as extra st.Page entries.
 # --------------------------------------------------------------------------- #
 def main() -> None:
     st.set_page_config(page_title="Trajectory Analyzer", layout="wide")
+    A.ensure_default_categories()
     pages = [
         st.Page(
             trajectory_viewer_page,
@@ -377,6 +735,8 @@ def main() -> None:
             icon="🛰️",
             default=True,
         ),
+        st.Page(categories_page, title="Categories", icon="🏷️"),
+        st.Page(summary_page, title="Summary", icon="📊"),
         # Future capabilities go here, e.g.:
         # st.Page(comparison_page, title="Compare", icon="⚖️"),
     ]

@@ -129,6 +129,27 @@ def _quick_find_trajectory(path: Path) -> Path | None:
     return None
 
 
+def quick_reward(path: str | Path) -> float | None:
+    """Cheaply read an instance's reward without parsing its trajectory."""
+    p = Path(path).expanduser()
+    for pattern in ("verifier/reward.txt", "*/verifier/reward.txt"):
+        for match in sorted(p.glob(pattern)):
+            try:
+                return float(match.read_text().strip())
+            except (ValueError, OSError):
+                pass
+    for pattern in ("result.json", "*/result.json"):
+        for match in sorted(p.glob(pattern)):
+            try:
+                data = json.loads(match.read_text())
+                rewards = (data.get("verifier_result") or {}).get("rewards") or {}
+                if "reward" in rewards:
+                    return float(rewards["reward"])
+            except (ValueError, OSError):
+                pass
+    return None
+
+
 def discover_instances(raw: str) -> list[tuple[str, str]]:
     """Find selectable trajectory instances at ``raw``.
 

@@ -1,0 +1,39 @@
+{
+  "categories": [
+    {
+      "type": "fail",
+      "name": "prompts_user",
+      "description": "asks user to put some sort of input to continue"
+    },
+    {
+      "type": "fail",
+      "name": "adds_env_var",
+      "description": "adds an environment variable necessary to be used in order to run the project, which the benchmark doesn't know about"
+    },
+    {
+      "type": "fail",
+      "name": "truncated",
+      "description": "truncated early and stopped generation halfway"
+    },
+    {
+      "type": "fail",
+      "name": "empty_tool_call",
+      "description": "tool call called doesn't have any body"
+    },
+    {
+      "type": "fail",
+      "name": "confident_without_checking",
+      "description": "doesn't check the generated code and assumes it works correctly"
+    },
+    {
+      "type": "fail",
+      "name": "empty_tool_response",
+      "description": "tool response is empty"
+    },
+    {
+      "type": "fail",
+      "name": "uses_git_after_done",
+      "description": "uses git after being done with the task for additional unnecessary actions"
+    }
+  ]
+}
