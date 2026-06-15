@@ -221,3 +221,6 @@ pyrightconfig.json
 # Trajectory Analyzer runtime
 streamlit.log
 .streamlit.pid
+
+# Exported summaries
+out/
