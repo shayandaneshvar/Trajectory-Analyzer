@@ -257,9 +257,27 @@ def _observations_by_call_id(observation: Any) -> dict[str, str]:
 def _flatten_step(index: int, raw: dict[str, Any]) -> Step:
     blocks: list[Block] = []
 
+    # Combined assistant block (reasoning + message), placed above tool calls.
     reasoning = raw.get("reasoning_content")
-    if isinstance(reasoning, str) and reasoning.strip():
-        blocks.append(Block(ROLE_REASONING, "reasoning", reasoning))
+    reasoning_text = reasoning.strip() if isinstance(reasoning, str) else ""
+
+    message = raw.get("message")
+    if isinstance(message, str):
+        message_text = message.strip()
+        if message_text == "(tool use)":  # placeholder, not a real message
+            message_text = ""
+    elif isinstance(message, (dict, list)):
+        message_text = _stringify(message)
+    else:
+        message_text = ""
+
+    # For agent/assistant steps, always surface an assistant block when there's
+    # any assistant content (reasoning and/or message).
+    if reasoning_text or message_text:
+        blocks.append(
+            Block(ROLE_ASSISTANT, "assistant", message_text,
+                  meta={"reasoning": reasoning_text})
+        )
 
     tool_calls = raw.get("tool_calls") or []
     obs_map = _observations_by_call_id(raw.get("observation"))
@@ -299,13 +317,6 @@ def _flatten_step(index: int, raw: dict[str, Any]) -> Step:
                 meta={"tool_call_id": call_id},
             )
         )
-
-    # Assistant text message (skip the "(tool use)" placeholder).
-    message = raw.get("message")
-    if isinstance(message, str) and message.strip() and message.strip() != "(tool use)":
-        blocks.append(Block(ROLE_ASSISTANT, "assistant", message))
-    elif isinstance(message, (dict, list)):
-        blocks.append(Block(ROLE_ASSISTANT, "assistant", _stringify(message)))
 
     return Step(
         index=index,

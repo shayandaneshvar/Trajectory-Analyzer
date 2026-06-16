@@ -154,6 +154,32 @@ def inject_css() -> None:
                      text-transform: uppercase; letter-spacing: .3px; }
       .block pre { white-space: pre-wrap; word-break: break-word; margin: 0;
                    font-size: 12.5px; }
+      /* Reasoning sub-rectangle inside the assistant block. */
+      .reasoning-box {
+        border: 1px dashed rgba(46,125,50,0.6); border-radius: 4px;
+        background: rgba(46,125,50,0.10);
+        padding: 6px 8px; margin-bottom: 8px;
+      }
+      .reasoning-label {
+        font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+        color: #66bb6a; margin-bottom: 3px;
+      }
+      .reasoning-box pre { font-style: italic; opacity: .9; }
+      .assistant-msg { font-size: 12.5px; }
+      /* Tool call / response containers: colored left border + hover ✨ button. */
+      [class*="st-key-toolcall__"], [class*="st-key-toolresp__"] {
+        border-radius: 4px; padding: 6px 12px; margin: 8px 0;
+        background: rgba(128,128,128,0.06);
+      }
+      [class*="st-key-toolcall__"] { border-left: 5px solid #2196f3; }
+      [class*="st-key-toolresp__"] { border-left: 5px solid #e53935; }
+      [class*="st-key-toolcall__"] .stButton button,
+      [class*="st-key-toolresp__"] .stButton button {
+        opacity: 0; transition: opacity .12s ease;
+        min-height: 0; padding: 0 6px; border: none; background: transparent;
+      }
+      [class*="st-key-toolcall__"]:hover .stButton button,
+      [class*="st-key-toolresp__"]:hover .stButton button { opacity: 1; }
       .response-box { max-height: %dpx; overflow: auto;
                       background: rgba(0,0,0,0.25); border-radius: 4px; padding: 8px; }
       .step-header { margin-top: 18px; padding-top: 6px;
@@ -255,7 +281,14 @@ def render_legend() -> None:
     st.markdown(f'<div class="legend">{items}</div>', unsafe_allow_html=True)
 
 
-def render_block(block: T.Block) -> None:
+def render_block(block: T.Block, key: str = "") -> None:
+    if block.role == T.ROLE_ASSISTANT:
+        render_assistant_block(block)
+        return
+    if block.role in (T.ROLE_TOOL_CALL, T.ROLE_TOOL_RESPONSE):
+        render_tool_block(block, key)
+        return
+
     color = ROLE_COLORS.get(block.role, "#888")
     body = html.escape(block.body)
     pre_class = "response-box" if block.role == T.ROLE_TOOL_RESPONSE else ""
@@ -268,6 +301,75 @@ def render_block(block: T.Block) -> None:
         f'{inner}</div>',
         unsafe_allow_html=True,
     )
+
+
+def render_assistant_block(block: T.Block) -> None:
+    """Assistant block: reasoning (italic sub-box) on top, message below."""
+    color = ROLE_COLORS[T.ROLE_ASSISTANT]
+    reasoning = (block.meta or {}).get("reasoning", "")
+
+    parts = [
+        f'<div class="block-title" style="color:{color}">assistant</div>'
+    ]
+    if reasoning:
+        parts.append(
+            '<div class="reasoning-box">'
+            '<div class="reasoning-label">reasoning</div>'
+            f'<pre>{html.escape(reasoning)}</pre></div>'
+        )
+    if block.body:
+        parts.append(f'<pre class="assistant-msg">{html.escape(block.body)}</pre>')
+
+    st.markdown(
+        f'<div class="block" style="border-left-color:{color}">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _try_json(text: str):
+    """Return a parsed JSON object/array if ``text`` is JSON, else None."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        return json.loads(stripped)
+    except ValueError:
+        return None
+
+
+def render_tool_block(block: T.Block, key: str) -> None:
+    """Tool call / response block with a hover ✨ button to beautify content."""
+    color = ROLE_COLORS[block.role]
+    prefix = "toolcall" if block.role == T.ROLE_TOOL_CALL else "toolresp"
+    state_key = f"beautify::{key}"
+    beautified = st.session_state.get(state_key, False)
+
+    with st.container(key=f"{prefix}__{key}"):
+        head, btn = st.columns([12, 1], vertical_alignment="center")
+        head.markdown(
+            f'<div class="block-title" style="color:{color}">'
+            f'{html.escape(block.title)}</div>',
+            unsafe_allow_html=True,
+        )
+        if btn.button("✨" if not beautified else "↩",
+                      key=f"btn::{state_key}",
+                      help="Beautify (easy-to-read)" if not beautified else "Show raw"):
+            st.session_state[state_key] = not beautified
+            st.rerun()
+
+        if beautified:
+            obj = _try_json(block.body)
+            if obj is not None:
+                st.json(obj)
+            else:
+                st.code(block.body)
+        elif block.role == T.ROLE_TOOL_RESPONSE:
+            st.markdown(
+                f'<div class="response-box"><pre>{html.escape(block.body)}</pre></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(f'<pre>{html.escape(block.body)}</pre>', unsafe_allow_html=True)
 
 
 def render_step(step: T.Step) -> None:
@@ -288,8 +390,8 @@ def render_step(step: T.Step) -> None:
         f'<div style="font-size:12px;opacity:.7">{html.escape(sub)}</div></div>',
         unsafe_allow_html=True,
     )
-    for block in step.blocks:
-        render_block(block)
+    for i, block in enumerate(step.blocks):
+        render_block(block, key=f"{step.index}_{i}")
 
 
 def render_header(traj: T.Trajectory) -> None:
