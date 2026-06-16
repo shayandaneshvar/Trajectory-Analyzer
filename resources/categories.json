@@ -34,6 +34,56 @@
       "type": "fail",
       "name": "uses_git_after_done",
       "description": "uses git after being done with the task for additional unnecessary actions"
+    },
+    {
+      "type": "fail",
+      "name": "tool_knowledge",
+      "description": "related to not knowing enough about how certain tool works, like kafka"
+    },
+    {
+      "type": "fail",
+      "name": "api_mismatch",
+      "description": "the unseen test which is added, expects a different api, hence Value Errors, Attribute Erros, and Assertion Errors in a few cases can be seen in the tests"
+    },
+    {
+      "type": "fail",
+      "name": "over_engineering",
+      "description": "Does unwanted extra work that leads to breaking of the code"
+    },
+    {
+      "type": "fail",
+      "name": "too_big_task",
+      "description": "The task is unrealisticly big that makes the LLM either reach its context or the LLM does half of the work"
+    },
+    {
+      "type": "fail",
+      "name": "reasoning_action_mismatch",
+      "description": "reasoning content and the action followed do not match"
+    },
+    {
+      "type": "fail",
+      "name": "preexisting_failures",
+      "description": "some tests that are already failing confuses the LLM, and eats up the context window and the LLM hallucinates or forgets"
+    },
+    {
+      "type": "fail",
+      "name": "syntax_error",
+      "description": "the LLM led to a syntax error that failed the test"
+    },
+    {
+      "type": "fail",
+      "name": "reasoning_loop",
+      "description": "gets stuck in reasoning, and keeps repeating itself till it dies"
+    },
+    {
+      "type": "fail",
+      "name": "uses_unavailable_package",
+      "description": "uses a package that is not installed"
+    },
+    {
+      "type": "fail",
+      "name": "requires_login_to_3rdparty",
+      "description": "the code requires login to 3rd party to download requirements like huggingface or dockerhub"
     }
   ]
 }
