@@ -18,6 +18,7 @@ from collections import Counter
 import streamlit as st
 
 import analysis as A
+import report as R
 import trajectory as T
 
 # --------------------------------------------------------------------------- #
@@ -472,6 +473,45 @@ def _reward_for(path: str) -> float | None:
     return T.quick_reward(path)
 
 
+@st.cache_data(show_spinner=False)
+def _inst_stats(path: str) -> dict:
+    return A.instance_stats(path)
+
+
+def _enrich_failures(failures: list) -> list:
+    """Attach per-sample steps / input / output tokens to each failure sample."""
+    for grp in failures:
+        for s in grp["samples"]:
+            st_ = _inst_stats(s["path"])
+            s["steps"] = st_.get("steps")
+            s["input_tokens"] = st_.get("input_tokens")
+            s["output_tokens"] = st_.get("output_tokens")
+    return failures
+
+
+def _repo_bars_html(repos: list) -> str:
+    """Colored rows: 'Repo name  x% (M/N)' with a bar width = pass rate."""
+    rows = []
+    for r in repos:
+        total = r["total"] or 1
+        rate = r["passed"] / total
+        pct = round(rate * 100)
+        grad = ("linear-gradient(90deg,#2e7d32,#4caf50)" if rate >= 0.6
+                else "linear-gradient(90deg,#e65100,#ffab40)" if rate >= 0.3
+                else "linear-gradient(90deg,#c62828,#ff5a65)")
+        rows.append(
+            '<div style="display:flex;align-items:center;gap:12px;margin:5px 0">'
+            f'<div style="width:200px;text-align:right;color:#9498b3;font-size:0.85em;'
+            'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+            f'{html.escape(r["repo"])}</div>'
+            '<div style="flex:1;height:26px;background:#222640;border-radius:6px;overflow:hidden">'
+            f'<div style="height:100%;width:{max(6, pct)}%;background:{grad};display:flex;'
+            'align-items:center;padding-left:8px;color:#fff;font-size:0.8em;font-weight:600;'
+            f'border-radius:6px">{pct}% ({r["passed"]}/{r["total"]})</div></div></div>'
+        )
+    return "".join(rows)
+
+
 def _reward_badge(path: str) -> str:
     r = _reward_for(path)
     if r is None:
@@ -824,6 +864,228 @@ def summary_page() -> None:
         st.success(f"Saved summary to `{out_path}`")
 
 
+def _gather_report_data(base: str):
+    """Stats (from result.json), tag rows, and per-sample tags under ``base``."""
+    stats = A.load_run_stats(base)
+    assignments = A.collect_assignments(base)
+    descriptions = A.category_descriptions()
+
+    counts = Counter()
+    by_sample: dict[str, dict] = {}
+    for cat_id, items in assignments.items():
+        for it in items:
+            counts[cat_id] += 1
+            s = by_sample.setdefault(it["folder"],
+                                     {"name": it["folder"], "path": it["path"], "tags": []})
+            s["tags"].append(cat_id)
+
+    tag_rows = [{"tag": c, "count": n, "description": descriptions.get(c, "")}
+                for c, n in counts.most_common()]
+    samples = [{"name": s["name"], "status": _reward_badge(s["path"]),
+                "tags": sorted(s["tags"])}
+               for s in sorted(by_sample.values(), key=lambda x: x["name"])]
+
+    # Failed trials grouped by failure reason (tag), most common first.
+    failures_by_reason = []
+    for cat_id, _n in counts.most_common():
+        items = assignments[cat_id]
+        failures_by_reason.append({
+            "tag": cat_id,
+            "description": descriptions.get(cat_id, ""),
+            "samples": [{"name": it["folder"], "note": it.get("notes", ""),
+                         "status": _reward_badge(it["path"]), "path": it["path"]}
+                        for it in items],
+        })
+    return stats, tag_rows, samples, failures_by_reason
+
+
+def report_page() -> None:
+    st.header("🔬 Report")
+
+    base = st.text_input(
+        "Path to a folder of trajectories",
+        value=st.session_state.get("traj_base_path", "samples"),
+        help="Stats come from this folder's result.json; categories from your tagging.",
+    )
+    st.session_state["traj_base_path"] = base
+    if not base.strip():
+        st.info("Enter a path to build a report.")
+        return
+
+    # Parent folder name on top of the page.
+    from pathlib import Path as _Path
+    st.markdown(f"#### 📁 `{_Path(base).name or base}`")
+
+    stats, tag_rows, samples, failures = _gather_report_data(base)
+    compare = A.compare_token_steps(base)
+    repos = A.repo_breakdown(base)
+    report_data = A.load_report(base)
+
+    # Experiment metadata (persisted in traj-report.json).
+    exp = report_data.get("experiment", {})
+    c1, c2 = st.columns(2)
+    exp_name = c1.text_input("Experiment name", value=exp.get("name", ""),
+                             key="report_exp_name")
+    exp_desc = c2.text_input("Description", value=exp.get("description", ""),
+                             key="report_exp_desc")
+    if (exp_name != exp.get("name", "")) or (exp_desc != exp.get("description", "")):
+        A.set_report_experiment(base, exp_name, exp_desc)
+
+    # Overview stats.
+    st.subheader("Overview")
+    pr = stats.get("pass_rate")
+    m = st.columns(5)
+    m[0].metric("Pass rate", f"{pr * 100:.1f}%" if isinstance(pr, (int, float)) else "—")
+    m[1].metric("Total", stats.get("total") if stats.get("total") is not None else "—")
+    m[2].metric("Passed", stats.get("passed") if stats.get("passed") is not None else "—")
+    m[3].metric("Failed", stats.get("failed") if stats.get("failed") is not None else "—")
+    m[4].metric("Errored", stats.get("errors") if stats.get("errors") is not None else "—")
+    if stats.get("total") is None:
+        st.caption("No result.json found at this path — stats come only from tagging.")
+
+    # Failure-by-tag chart.
+    st.subheader("Failure categories by tag")
+    if tag_rows:
+        st.bar_chart({r["tag"]: r["count"] for r in tag_rows}, horizontal=True)
+    else:
+        st.caption("No tags assigned under this path yet.")
+
+    # Passed vs failed: tokens & steps.
+    st.subheader("Passed vs failed (tokens & steps)")
+    p, f = compare["passed"], compare["failed"]
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.markdown(f"**✅ Passed ({p['n']})**")
+        st.metric("Avg input tokens", f"{p['avg_input']:,}" if p["avg_input"] else "—")
+        st.metric("Avg output tokens", f"{p['avg_output']:,}" if p["avg_output"] else "—")
+        st.metric("Avg steps", p["avg_steps"] if p["avg_steps"] is not None else "—")
+    with cc2:
+        st.markdown(f"**❌ Failed ({f['n']})**")
+        st.metric("Avg input tokens", f"{f['avg_input']:,}" if f["avg_input"] else "—")
+        st.metric("Avg output tokens", f"{f['avg_output']:,}" if f["avg_output"] else "—")
+        st.metric("Avg steps", f["avg_steps"] if f["avg_steps"] is not None else "—")
+
+    # Per-repository pass rate, as colored rows.
+    st.subheader("Analysis by repository")
+    if repos:
+        st.markdown(_repo_bars_html(repos), unsafe_allow_html=True)
+    else:
+        st.caption("No repository data available.")
+
+    # Detailed failed trials by reason: an "All" tab plus one tab per reason,
+    # each a table of steps / input tokens / output tokens / note.
+    st.subheader("Failed trials by reason")
+    if failures:
+        _enrich_failures(failures)
+        all_rows = [{**s, "tag": g["tag"]} for g in failures for s in g["samples"]]
+        labels = [f"All ({len(all_rows)})"] + \
+                 [f"{g['tag']} ({len(g['samples'])})" for g in failures]
+        tabs = st.tabs(labels)
+
+        def _fail_rows(samples, with_reason=False):
+            out = []
+            for s in samples:
+                row = {"name": s["name"]}
+                if with_reason:
+                    row["reason"] = s.get("tag", "")
+                row.update({
+                    "status": s.get("status", ""),
+                    "steps": s.get("steps"),
+                    "input tokens": s.get("input_tokens"),
+                    "output tokens": s.get("output_tokens"),
+                    "note": s.get("note", ""),
+                })
+                out.append(row)
+            return out
+
+        with tabs[0]:
+            st.dataframe(_fail_rows(all_rows, with_reason=True),
+                         width="stretch", hide_index=True)
+        for tab, grp in zip(tabs[1:], failures):
+            with tab:
+                if grp["description"]:
+                    st.caption(grp["description"])
+                st.dataframe(_fail_rows(grp["samples"]),
+                             width="stretch", hide_index=True)
+    else:
+        st.caption("No tagged failures yet.")
+
+    # Action cards (grouped 3 per row).
+    st.subheader("Action items")
+    _render_report_cards(base, report_data, tag_rows)
+
+    # Export.
+    st.subheader("Export")
+    if st.button("Export report (HTML)"):
+        from datetime import datetime
+        meta = {
+            "experiment_name": exp_name,
+            "description": exp_desc,
+            "source_path": base,
+            "model": stats.get("model"),
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        html_text = R.build_report_html(
+            meta, stats, tag_rows, A.load_report(base).get("cards", []),
+            samples, compare=compare, repos=repos, failures_by_reason=failures)
+        out_path = A.export_report_html(html_text)
+        st.success(f"Saved report to `{out_path}`")
+        st.download_button("Download HTML", data=html_text,
+                           file_name=out_path.name, mime="text/html")
+
+
+def _render_report_cards(base: str, report_data: dict, tag_rows: list) -> None:
+    cards = report_data.get("cards", [])
+    tag_options = [r["tag"] for r in tag_rows] or A_all_tag_ids()
+
+    # Grouped 3 per row, like the example report.
+    for row_start in range(0, len(cards), 3):
+        cols = st.columns(3)
+        for col, i in zip(cols, range(row_start, min(row_start + 3, len(cards)))):
+            card = cards[i]
+            prio = card.get("priority", "Medium")
+            color = R.PRIORITY_COLORS.get(prio, "#6c72ff")
+            with col.container(border=True):
+                top, btn = st.columns([10, 1], vertical_alignment="center")
+                top.markdown(
+                    f"**{card.get('title', 'Untitled')}** "
+                    f"<span style='color:{color};font-weight:700'>[{prio}]</span>",
+                    unsafe_allow_html=True,
+                )
+                if btn.button("🗑", key=f"delcard::{base}::{i}", help="Delete card"):
+                    A.remove_report_card(base, i)
+                    st.rerun()
+                tags = " ".join(f"`{t}`" for t in card.get("tags", []))
+                if tags:
+                    st.markdown(tags)
+                if card.get("issue"):
+                    st.markdown(card["issue"])
+                if card.get("action"):
+                    st.markdown(f"💡 **How to address:** {card['action']}")
+
+    with st.expander("➕ Add action card"):
+        title = st.text_input("Title", key="newcard_title")
+        prio = st.selectbox("Priority", R.PRIORITY_ORDER, key="newcard_prio")
+        tags = st.multiselect("Related tags", tag_options, key="newcard_tags")
+        issue = st.text_area("Issue", key="newcard_issue",
+                             placeholder="What's going wrong?")
+        action = st.text_area("How to address", key="newcard_action",
+                              placeholder="What to do to fix or mitigate it.")
+        if st.button("Add card", key="newcard_add"):
+            if not title.strip():
+                st.warning("Please enter a title.")
+            else:
+                A.add_report_card(base, {
+                    "title": title.strip(), "priority": prio, "tags": tags,
+                    "issue": issue.strip(), "action": action.strip(),
+                })
+                st.rerun()
+
+
+def A_all_tag_ids() -> list[str]:
+    return [A.category_id(c) for c in A.load_categories()]
+
+
 # --------------------------------------------------------------------------- #
 # Main: top navigation bar. Add new capabilities as extra st.Page entries.
 # --------------------------------------------------------------------------- #
@@ -839,6 +1101,7 @@ def main() -> None:
         ),
         st.Page(categories_page, title="Categories", icon="🏷️"),
         st.Page(summary_page, title="Summary", icon="📊"),
+        st.Page(report_page, title="Report", icon="🔬"),
         # Future capabilities go here, e.g.:
         # st.Page(comparison_page, title="Compare", icon="⚖️"),
     ]
