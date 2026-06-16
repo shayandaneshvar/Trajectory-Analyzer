@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import trajectory as T
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 RESOURCES_DIR = PROJECT_ROOT / "resources"
 CATEGORIES_FILE = RESOURCES_DIR / "categories.json"
@@ -26,6 +28,9 @@ SUMMARIES_DIR = PROJECT_ROOT / "out" / "summaries"
 
 ANALYSIS_FILENAME = "traj-analysis.json"
 ANALYSIS_SCHEMA = "traj-analysis-v1"
+REPORT_FILENAME = "traj-report.json"
+REPORT_SCHEMA = "traj-report-v1"
+REPORTS_DIR = PROJECT_ROOT / "out" / "reports"
 
 DEFAULT_TYPE = "fail"
 
@@ -245,6 +250,225 @@ def collect_assignments(base_path: str, max_files: int = 2000) -> dict[str, list
 
 
 # --------------------------------------------------------------------------- #
+# Run-level stats (from the run's result.json)
+# --------------------------------------------------------------------------- #
+def load_run_stats(base_path: str) -> dict[str, Any]:
+    """Pull overview stats from ``<base>/result.json`` (best-effort).
+
+    Returns total / passed / failed / errors / pass_rate / eval_name / model.
+    Missing pieces are left as None.
+    """
+    out: dict[str, Any] = {
+        "total": None, "passed": None, "failed": None, "errors": None,
+        "pass_rate": None, "eval_name": None, "model": None,
+    }
+    result_file = Path(base_path).expanduser() / "result.json"
+    if not result_file.is_file():
+        return out
+    try:
+        data = json.loads(result_file.read_text())
+    except (ValueError, OSError):
+        return out
+
+    stats = data.get("stats") or {}
+    out["total"] = data.get("n_total_trials") or stats.get("n_trials")
+
+    evals = stats.get("evals") or {}
+    if evals:
+        eval_name, ev = next(iter(evals.items()))
+        out["eval_name"] = eval_name
+        metrics = ev.get("metrics") or []
+        if metrics and isinstance(metrics[0], dict) and "mean" in metrics[0]:
+            out["pass_rate"] = metrics[0]["mean"]
+        reward = (ev.get("reward_stats") or {}).get("reward") or {}
+        if reward:
+            out["passed"] = len(reward.get("1.0", []) or [])
+            out["failed"] = len(reward.get("0.0", []) or [])
+        exc = ev.get("exception_stats") or {}
+        out["errors"] = sum(len(v or []) for v in exc.values())
+
+    if out["errors"] is None:
+        out["errors"] = stats.get("n_errors")
+    if out["pass_rate"] is None and out["passed"] is not None:
+        denom = (out["passed"] or 0) + (out["failed"] or 0)
+        out["pass_rate"] = (out["passed"] / denom) if denom else None
+
+    cfg_agent = (data.get("config") or {}).get("agent") or {}
+    out["model"] = cfg_agent.get("model_name") or cfg_agent.get("name")
+    return out
+
+
+def instance_stats(path: str) -> dict[str, Any]:
+    """Reward + token/step counts for one instance (best-effort)."""
+    p = Path(path).expanduser()
+    out: dict[str, Any] = {"reward": None, "input_tokens": None,
+                           "output_tokens": None, "steps": None}
+
+    for pattern in ("result.json", "*/result.json"):
+        for m in sorted(p.glob(pattern)):
+            try:
+                d = json.loads(m.read_text())
+            except (ValueError, OSError):
+                continue
+            ar = d.get("agent_result") or {}
+            out["input_tokens"] = ar.get("n_input_tokens")
+            out["output_tokens"] = ar.get("n_output_tokens")
+            vr = (d.get("verifier_result") or {}).get("rewards") or {}
+            if "reward" in vr:
+                out["reward"] = vr["reward"]
+            break
+        if out["input_tokens"] is not None:
+            break
+
+    if out["reward"] is None:
+        out["reward"] = T.quick_reward(p)
+
+    for pattern in ("agent/trajectory.json", "*/agent/trajectory.json"):
+        for m in sorted(p.glob(pattern)):
+            try:
+                d = json.loads(m.read_text())
+            except (ValueError, OSError):
+                continue
+            fm = d.get("final_metrics") or {}
+            out["steps"] = fm.get("total_steps") or len(d.get("steps") or [])
+            break
+        if out["steps"] is not None:
+            break
+    return out
+
+
+def compare_token_steps(base_path: str) -> dict[str, dict[str, Any]]:
+    """Average input/output tokens and steps for passed vs failed instances."""
+    buckets = {
+        "passed": {"n": 0, "input": 0, "output": 0, "steps": 0},
+        "failed": {"n": 0, "input": 0, "output": 0, "steps": 0},
+    }
+    for _name, path in T.discover_instances(base_path):
+        s = instance_stats(path)
+        if s["reward"] is None:
+            continue
+        b = buckets["passed"] if s["reward"] >= 1.0 else buckets["failed"]
+        b["n"] += 1
+        b["input"] += s["input_tokens"] or 0
+        b["output"] += s["output_tokens"] or 0
+        b["steps"] += s["steps"] or 0
+
+    def averaged(b: dict[str, Any]) -> dict[str, Any]:
+        n = b["n"]
+        return {
+            "n": n,
+            "avg_input": round(b["input"] / n) if n else None,
+            "avg_output": round(b["output"] / n) if n else None,
+            "avg_steps": round(b["steps"] / n, 1) if n else None,
+        }
+
+    return {"passed": averaged(buckets["passed"]),
+            "failed": averaged(buckets["failed"])}
+
+
+def _repo_of(name: str) -> str:
+    """Repository/owner key = the first ``__``-separated token."""
+    return name.split("__")[0]
+
+
+def repo_breakdown(base_path: str) -> list[dict[str, Any]]:
+    """Pass rate per repository (n passed / N total), worst first.
+
+    Prefers the run's result.json reward lists (full coverage); falls back to
+    discovered instances when no result.json is present.
+    """
+    passed_map: dict[str, bool] = {}
+    result_file = Path(base_path).expanduser() / "result.json"
+    used = False
+    if result_file.is_file():
+        try:
+            d = json.loads(result_file.read_text())
+            evals = (d.get("stats") or {}).get("evals") or {}
+            if evals:
+                ev = next(iter(evals.values()))
+                reward = (ev.get("reward_stats") or {}).get("reward") or {}
+                for nm in reward.get("1.0", []) or []:
+                    passed_map[nm] = True
+                for nm in reward.get("0.0", []) or []:
+                    passed_map[nm] = False
+                used = True
+        except (ValueError, OSError):
+            pass
+    if not used:
+        for name, path in T.discover_instances(base_path):
+            r = T.quick_reward(path)
+            if r is not None:
+                passed_map[name] = r >= 1.0
+
+    repos: dict[str, dict[str, Any]] = {}
+    for nm, passed in passed_map.items():
+        g = repos.setdefault(_repo_of(nm), {"repo": _repo_of(nm), "passed": 0, "total": 0})
+        g["total"] += 1
+        if passed:
+            g["passed"] += 1
+
+    return sorted(
+        repos.values(),
+        key=lambda g: (g["passed"] / g["total"] if g["total"] else 0, -g["total"]),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Report cards (persisted next to the run, in traj-report.json)
+# --------------------------------------------------------------------------- #
+def _report_file(base_path: str) -> Path:
+    return Path(base_path).expanduser() / REPORT_FILENAME
+
+
+def load_report(base_path: str) -> dict[str, Any]:
+    f = _report_file(base_path)
+    if f.is_file():
+        try:
+            data = json.loads(f.read_text())
+            if isinstance(data, dict):
+                data.setdefault("schema", REPORT_SCHEMA)
+                data.setdefault("experiment", {"name": "", "description": ""})
+                data.setdefault("cards", [])
+                return data
+        except (ValueError, OSError):
+            pass
+    return {"schema": REPORT_SCHEMA,
+            "experiment": {"name": "", "description": ""}, "cards": []}
+
+
+def save_report(base_path: str, data: dict[str, Any]) -> None:
+    f = _report_file(base_path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def add_report_card(base_path: str, card: dict[str, Any]) -> None:
+    data = load_report(base_path)
+    data["cards"].append(card)
+    save_report(base_path, data)
+
+
+def update_report_card(base_path: str, index: int, card: dict[str, Any]) -> None:
+    data = load_report(base_path)
+    if 0 <= index < len(data["cards"]):
+        data["cards"][index] = card
+        save_report(base_path, data)
+
+
+def remove_report_card(base_path: str, index: int) -> None:
+    data = load_report(base_path)
+    if 0 <= index < len(data["cards"]):
+        data["cards"].pop(index)
+        save_report(base_path, data)
+
+
+def set_report_experiment(base_path: str, name: str, description: str) -> None:
+    data = load_report(base_path)
+    data["experiment"] = {"name": name, "description": description}
+    save_report(base_path, data)
+
+
+# --------------------------------------------------------------------------- #
 # Summary export
 # --------------------------------------------------------------------------- #
 def export_summary(payload: dict[str, Any]) -> Path:
@@ -259,4 +483,12 @@ def export_summary(payload: dict[str, Any]) -> Path:
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
     path = SUMMARIES_DIR / f"{now.strftime('%Y-%m-%dT%H-%M-%S')}.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    return path
+
+
+def export_report_html(html_text: str) -> Path:
+    """Write a standalone HTML report to out/reports/<datetime>.html."""
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORTS_DIR / f"{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}.html"
+    path.write_text(html_text, encoding="utf-8")
     return path
