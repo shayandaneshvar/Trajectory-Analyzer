@@ -25,6 +25,7 @@ from typing import Any
 
 # Logical roles a block can have. The UI maps each to a colour.
 ROLE_SYSTEM = "system"
+ROLE_USER = "user"
 ROLE_REASONING = "reasoning"
 ROLE_ASSISTANT = "assistant"
 ROLE_TOOL_CALL = "tool_call"
@@ -32,11 +33,20 @@ ROLE_TOOL_RESPONSE = "tool_response"
 
 ROLE_ORDER = [
     ROLE_SYSTEM,
+    ROLE_USER,
     ROLE_REASONING,
     ROLE_ASSISTANT,
     ROLE_TOOL_CALL,
     ROLE_TOOL_RESPONSE,
 ]
+
+# A step's ``source`` maps to the role of its primary message block.
+SOURCE_ROLE = {
+    "agent": ROLE_ASSISTANT,
+    "assistant": ROLE_ASSISTANT,
+    "system": ROLE_SYSTEM,
+    "user": ROLE_USER,
+}
 
 
 @dataclass
@@ -271,13 +281,21 @@ def _flatten_step(index: int, raw: dict[str, Any]) -> Step:
     else:
         message_text = ""
 
-    # For agent/assistant steps, always surface an assistant block when there's
-    # any assistant content (reasoning and/or message).
-    if reasoning_text or message_text:
-        blocks.append(
-            Block(ROLE_ASSISTANT, "assistant", message_text,
-                  meta={"reasoning": reasoning_text})
-        )
+    # The primary message block's role comes from the step's source:
+    # agent -> assistant, system -> system, user -> user.
+    role = SOURCE_ROLE.get(raw.get("source"), ROLE_ASSISTANT)
+    if role == ROLE_ASSISTANT:
+        # Combined assistant block: reasoning (sub-box) + message.
+        if reasoning_text or message_text:
+            blocks.append(
+                Block(ROLE_ASSISTANT, "assistant", message_text,
+                      meta={"reasoning": reasoning_text})
+            )
+    else:
+        # system / user: a single message block (fold in reasoning if any).
+        body = "\n\n".join(t for t in (reasoning_text, message_text) if t)
+        if body:
+            blocks.append(Block(role, role, body))
 
     tool_calls = raw.get("tool_calls") or []
     obs_map = _observations_by_call_id(raw.get("observation"))

@@ -26,6 +26,7 @@ import trajectory as T
 # --------------------------------------------------------------------------- #
 ROLE_COLORS = {
     T.ROLE_SYSTEM: "#9e9e9e",        # grey
+    T.ROLE_USER: "#ffca28",          # yellow/amber
     T.ROLE_REASONING: "#2e7d32",     # dark green (assistant thinking)
     T.ROLE_ASSISTANT: "#4caf50",     # green
     T.ROLE_TOOL_CALL: "#2196f3",     # blue
@@ -33,6 +34,7 @@ ROLE_COLORS = {
 }
 ROLE_LABELS = {
     T.ROLE_SYSTEM: "System",
+    T.ROLE_USER: "User",
     T.ROLE_REASONING: "Reasoning",
     T.ROLE_ASSISTANT: "Assistant",
     T.ROLE_TOOL_CALL: "Tool call",
