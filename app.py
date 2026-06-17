@@ -610,6 +610,33 @@ def _apply_filters(instances: list[tuple[str, str]]) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------- #
 # Failure categorization (tag from the top of the viewer page)
 # --------------------------------------------------------------------------- #
+def render_failure_logs(traj: T.Trajectory) -> None:
+    """For failed trajectories, a toggle that shows the 'fail' lines from the
+    instance's verifier/test-stdout.txt."""
+    if traj.reward is None or traj.reward >= 1.0:
+        return
+
+    key = f"show_fail_logs::{traj.path}"
+    shown = st.session_state.get(key, False)
+    if st.button("Hide failure logs" if shown else "Show failure logs",
+                 key=f"btn::{key}"):
+        st.session_state[key] = not shown
+        st.rerun()
+
+    if not shown:
+        return
+
+    lines = T.failure_log_lines(traj.path)
+    if lines is None:
+        st.info("No `verifier/test-stdout.txt` found for this instance.")
+        return
+    if not lines:
+        st.caption("No lines containing “fail” found in the verifier log.")
+        return
+    st.caption(f"{len(lines)} line(s) containing “fail” in verifier/test-stdout.txt")
+    st.code("\n".join(lines), language="text")
+
+
 def render_tagging(analysis_file, entry_key: str) -> None:
     data = A.load_analysis(analysis_file)
     current = A.get_categories_for(data, entry_key)
@@ -709,6 +736,7 @@ def trajectory_viewer_page() -> None:
         return
 
     render_header(traj)
+    render_failure_logs(traj)
 
     base = st.session_state.get("traj_base_path", "")
     analysis_file, entry_key = A.analysis_target(base, chosen, traj.path)

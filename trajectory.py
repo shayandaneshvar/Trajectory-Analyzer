@@ -160,6 +160,30 @@ def quick_reward(path: str | Path) -> float | None:
     return None
 
 
+def failure_log_lines(traj_path: str | Path, term: str = "fail") -> list[str] | None:
+    """Lines containing ``term`` (case-insensitive) from the instance's
+    ``verifier/test-stdout.txt``.
+
+    Returns None if no such log file exists, else the matching lines (possibly
+    empty).
+    """
+    root = _instance_root(Path(traj_path))
+    log_file = root / "verifier" / "test-stdout.txt"
+    if not log_file.is_file():
+        found = (sorted(root.glob("verifier/test-stdout.txt"))
+                 or sorted(root.glob("*/verifier/test-stdout.txt")))
+        log_file = found[0] if found else None
+    if log_file is None:
+        return None
+
+    needle = term.lower()
+    try:
+        text = log_file.read_text(errors="replace")
+    except OSError:
+        return None
+    return [line for line in text.splitlines() if needle in line.lower()]
+
+
 def discover_instances(raw: str) -> list[tuple[str, str]]:
     """Find selectable trajectory instances at ``raw``.
 
